@@ -1,3 +1,4 @@
+
 "use client";
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -13,27 +14,25 @@ import { useToast } from '@/hooks/use-toast';
 import { analyzeTablePhotoAction, suggestShotParametersAction } from './actions';
 
 const TABLE_ASPECT_RATIO = 2 / 1; // Standard pool table aspect ratio (length/width)
-const BALL_RADIUS_NORMALIZED = 0.028; // Approximate normalized radius (e.g., 2.25 inches / 88 inches table width)
+const BALL_RADIUS_NORMALIZED = 0.028; // Approximate normalized radius (e.g., 2.25 inches / 88 inches table width for a 8ft table)
 
 const POCKET_DEFINITIONS: Pocket[] = [
-  { id: 'top-left', x: 0.02, y: 0.02, radius: 0.05 },
+  { id: 'top-left', x: 0.02, y: 0.02, radius: 0.045 }, // Slightly adjusted radius
   { id: 'top-middle', x: 0.5, y: 0.01, radius: 0.05 },
-  { id: 'top-right', x: 0.98, y: 0.02, radius: 0.05 },
-  { id: 'bottom-left', x: 0.02, y: 0.98, radius: 0.05 },
+  { id: 'top-right', x: 0.98, y: 0.02, radius: 0.045 },
+  { id: 'bottom-left', x: 0.02, y: 0.98, radius: 0.045 },
   { id: 'bottom-middle', x: 0.5, y: 0.99, radius: 0.05 },
-  { id: 'bottom-right', x: 0.98, y: 0.98, radius: 0.05 },
+  { id: 'bottom-right', x: 0.98, y: 0.98, radius: 0.045 },
 ];
 
 const DEFAULT_BALLS: Ball[] = [
   { id: 'cue', x: 0.25, y: 0.5, color: 'white', radius: BALL_RADIUS_NORMALIZED },
   { id: 'obj1', x: 0.75, y: 0.5, color: 'red', radius: BALL_RADIUS_NORMALIZED },
-  { id: 'obj2', x: 0.70, y: 0.4, color: 'yellow', radius: BALL_RADIUS_NORMALIZED },
-  { id: 'obj3', x: 0.80, y: 0.6, color: 'blue', radius: BALL_RADIUS_NORMALIZED },
 ];
 
 export default function CueVisionPage() {
   const [balls, setBalls] = useState<Ball[]>(DEFAULT_BALLS);
-  const [cueBallId, setCueBallId] = useState<string>('cue'); // Default cue ball
+  const [cueBallId, setCueBallId] = useState<string | null>('cue'); // Default cue ball
   const [selectedPocketId, setSelectedPocketId] = useState<PocketPosition | null>(null);
   const [numRails, setNumRails] = useState<number>(1);
   const [aimingMethod, setAimingMethod] = useState<'ball-first' | 'rail-first'>('ball-first');
@@ -54,14 +53,22 @@ export default function CueVisionPage() {
     toast({ title: "Table Reset", description: "Ball positions have been reset to default." });
   };
 
+  const handleBallMove = useCallback((ballId: string, newPosition: { x: number; y: number }) => {
+    setBalls(prevBalls =>
+      prevBalls.map(b =>
+        b.id === ballId ? { ...b, x: newPosition.x, y: newPosition.y } : b
+      )
+    );
+  }, []);
+
   const handleAnalyzeImage = useCallback(async (photoDataUri: string) => {
     setIsAnalyzing(true);
-    setShotSuggestion(null); // Clear previous suggestion
+    setShotSuggestion(null); 
     try {
       const result = await analyzeTablePhotoAction({ photoDataUri });
       if (result.ballPositions && result.ballPositions.length > 0) {
         const newBalls: Ball[] = result.ballPositions.map((bp: AnalyzedBallPosition, index: number) => ({
-          id: `ball-${index}-${Date.now()}`,
+          id: `ball-${index}-${Date.now()}`, // Consider more stable IDs if analysis needs to identify specific balls
           x: bp.x,
           y: bp.y,
           color: bp.color.toLowerCase(),
@@ -69,12 +76,10 @@ export default function CueVisionPage() {
         }));
         
         setBalls(newBalls);
-        // Attempt to find cue ball
         const foundCueBall = newBalls.find(b => b.color === 'white' || b.color === 'ivory');
         if (foundCueBall) {
           setCueBallId(foundCueBall.id);
         } else if (newBalls.length > 0) {
-          // Default to first ball if no white ball found
           setCueBallId(newBalls[0].id); 
           toast({ title: "Cue Ball Note", description: "White cue ball not distinctly identified. First ball selected as cue. You may need to adjust.", duration: 5000 });
         } else {
@@ -83,10 +88,15 @@ export default function CueVisionPage() {
 
         toast({ title: "Image Analyzed", description: "Ball positions updated from image." });
       } else {
-        toast({ variant: "destructive", title: "Analysis Incomplete", description: "No balls found in the image or analysis failed." });
+        // If AI returns empty or malformed, reset to default to avoid broken state
+        setBalls(DEFAULT_BALLS);
+        setCueBallId('cue');
+        toast({ variant: "destructive", title: "Analysis Incomplete", description: "No balls found or analysis failed. Table reset to default." });
       }
     } catch (error: any) {
-      toast({ variant: "destructive", title: "Analysis Error", description: error.message || "Failed to analyze image." });
+      setBalls(DEFAULT_BALLS); // Reset on error
+      setCueBallId('cue');
+      toast({ variant: "destructive", title: "Analysis Error", description: error.message || "Failed to analyze image. Table reset to default." });
     } finally {
       setIsAnalyzing(false);
     }
@@ -100,7 +110,6 @@ export default function CueVisionPage() {
     setIsSuggestingShot(true);
     setShotSuggestion(null);
 
-    // Prepare ball positions: cue ball first, then others
     const otherBalls = balls.filter(b => b.id !== cueBallId);
     const allBallSimplePositions: SimpleBallPosition[] = [
       { x: cueBall.x, y: cueBall.y },
@@ -123,6 +132,7 @@ export default function CueVisionPage() {
     }
   }, [cueBall, selectedPocketId, balls, cueBallId, numRails, aimingMethod, toast]);
 
+
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground">
       <Header />
@@ -130,12 +140,14 @@ export default function CueVisionPage() {
         <div className="lg:w-2/3 flex flex-col items-center">
           <PoolTable
             balls={balls}
+            setBalls={setBalls} // Pass setBalls for direct manipulation if needed by PoolTable, or use onBallMove
+            onBallMove={handleBallMove}
             pockets={POCKET_DEFINITIONS}
             selectedPocketId={selectedPocketId}
             onPocketClick={setSelectedPocketId}
             cueBall={cueBall}
             aimingPoint={shotSuggestion?.aimingPoint}
-            ballRadius={BALL_RADIUS_NORMALIZED * DEFAULT_BALLS[0].radius! * 1000} // Example scaling for display if needed
+            // ballRadius prop is handled by individual ball.radius in PoolTable
           />
           <Button variant="outline" onClick={handleResetBalls} className="mt-4">
             <RotateCcw className="mr-2 h-4 w-4" /> Reset Table
