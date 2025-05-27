@@ -4,6 +4,11 @@ export interface Ball {
   y: number; // Normalized 0-1 (relative to playing surface height)
   color: string; // e.g., 'white', 'red', 'blue', '#FF0000'
   radius?: number; // Normalized radius, optional
+  vx: number; // velocity in x
+  vy: number; // velocity in y
+  spinX: number; // angular velocity around X-axis, for side spin/english
+  spinY: number; // angular velocity around Y-axis, for top/back spin
+  isPocketed: boolean;
 }
 
 export type PocketPosition = 'top-left' | 'top-middle' | 'top-right' | 'bottom-left' | 'bottom-middle' | 'bottom-right';
