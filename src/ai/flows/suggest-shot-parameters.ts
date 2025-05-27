@@ -18,28 +18,28 @@ const SuggestShotParametersInputSchema = z.object({
       x: z.number().describe('X coordinate of the ball on the table.'),
       y: z.number().describe('Y coordinate of the ball on the table.'),
     }))
-    .describe('Array of ball positions on the table.'),
+    .describe('Array of ball positions on the table. The first ball (index 0) is the cue ball. The second ball (index 1) is the primary object ball.'),
   targetPocket: z
     .enum(['top-left', 'top-middle', 'top-right', 'bottom-left', 'bottom-middle', 'bottom-right'])
-    .describe('The pocket the user is aiming for.'),
+    .describe('The pocket the user is aiming for the object ball to go into.'),
   numberOfRails: z
     .number()
     .min(0)
     .max(5)
-    .describe('The number of rails the user wants to use for the shot.'),
+    .describe('The number of rails the object ball should contact (for ball-first) or the cue ball should contact (for rail-first) before the object ball is pocketed or struck, respectively.'),
   aimingMethod: z.enum(['ball-first', 'rail-first']).describe('The aiming method selected by the user.'),
 });
 export type SuggestShotParametersInput = z.infer<typeof SuggestShotParametersInputSchema>;
 
 const SuggestShotParametersOutputSchema = z.object({
   aimingPoint: z.object({
-    x: z.number().describe('X coordinate of the aiming point on the table.'),
-    y: z.number().describe('Y coordinate of the aiming point on the table.'),
-  }).describe('Suggested aiming point on the table.'),
-  powerPercentage: z.number().describe('Suggested power percentage for the shot (0-100).'),
+    x: z.number().describe('X coordinate of the aiming point on the table (normalized 0-1).'),
+    y: z.number().describe('Y coordinate of the aiming point on the table (normalized 0-1).'),
+  }).describe('Suggested aiming point on the table for the cue ball.'),
+  powerPercentage: z.number().min(0).max(100).describe('Suggested power percentage for the shot (0-100).'),
   cueBallSpin: z.object({
-    x: z.number().describe('X component of the cue ball spin.'),
-    y: z.number().describe('Y component of the cue ball spin.'),
+    x: z.number().min(-1).max(1).describe('X component of the cue ball spin (english: -1 for left, 1 for right).'),
+    y: z.number().min(-1).max(1).describe('Y component of the cue ball spin (top/bottom: -1 for bottom/draw, 1 for top/follow).'),
   }).describe('Suggested cue ball spin.'),
 });
 export type SuggestShotParametersOutput = z.infer<typeof SuggestShotParametersOutputSchema>;
@@ -52,20 +52,50 @@ const prompt = ai.definePrompt({
   name: 'suggestShotParametersPrompt',
   input: {schema: SuggestShotParametersInputSchema},
   output: {schema: SuggestShotParametersOutputSchema},
-  prompt: `You are an expert pool player and coach. You will be given the positions of the balls on the table, the target pocket, the number of rails the user wants to use, and the aiming method the user has selected. You will then suggest an aiming point, power percentage, and cue ball spin for the shot.
+  prompt: `You are an expert pool physicist and coach. Your task is to calculate and suggest the optimal aiming point, power, and cue ball spin for a given pool shot.
+The table coordinates are normalized from 0.0 to 1.0 for both x and y axes. (0,0) is the top-left corner of the playing surface.
 
-Ball Positions:
-{{#each ballPositions}}
-  Ball {{@index}}: x={{this.x}}, y={{this.y}}
-{{/each}}
+Pocket Locations (Normalized x, y, approximate centers):
+- 'top-left': (0.02, 0.02)
+- 'top-middle': (0.5, 0.01)
+- 'top-right': (0.98, 0.02)
+- 'bottom-left': (0.02, 0.98)
+- 'bottom-middle': (0.5, 0.99)
+- 'bottom-right': (0.98, 0.98)
 
-Target Pocket: {{{targetPocket}}}
-Number of Rails: {{{numberOfRails}}}
-Aiming Method: {{{aimingMethod}}}
+Input Parameters:
+- Cue Ball Position (ballPositions[0]): x={{ballPositions.[0].x}}, y={{ballPositions.[0].y}}
+{{#if ballPositions.[1]}}
+- Object Ball Position (ballPositions[1], primary target): x={{ballPositions.[1].x}}, y={{ballPositions.[1].y}}
+{{else}}
+- Critical Error: An object ball (ballPositions[1]) must be present for a shot suggestion. The 'ballPositions' array must contain at least two balls: cue ball first, then the object ball. If this is not the case, you cannot proceed.
+{{/if}}
+- Target Pocket: {{{targetPocket}}} (This is the pocket the OBJECT BALL (ballPositions[1]) MUST go into)
+- Number of Rails: {{{numberOfRails}}}
+- Aiming Method: {{{aimingMethod}}}
 
-Suggest an aiming point, power percentage, and cue ball spin for the shot. Return the values in JSON format.
+Instructions for Calculation:
+Your goal is to provide an \`aimingPoint\`, \`powerPercentage\`, and \`cueBallSpin\` in JSON format.
+The \`aimingPoint\` is where the center of the cue ball should be directed on the table's surface. This point should be between 0 and 1 for both x and y.
 
-{{output}}`,
+Consider the following based on \`aimingMethod\`:
+
+1.  If \`aimingMethod\` is 'ball-first':
+    *   The cue ball (ballPositions[0]) directly strikes the object ball (ballPositions[1]).
+    *   The object ball MUST then travel towards the \`{{{targetPocket}}}\`.
+    *   If \`{{{numberOfRails}}}\` > 0, the object ball MUST contact exactly \`{{{numberOfRails}}}\` rails *after* being struck by the cue ball and *before* entering the \`{{{targetPocket}}}\`.
+    *   The \`aimingPoint\` should be calculated on or near the object ball (e.g., using the ghost ball concept or a specific contact point on the object ball) to achieve the desired trajectory for the object ball into the \`{{{targetPocket}}}\` via the specified rails.
+
+2.  If \`aimingMethod\` is 'rail-first':
+    *   The cue ball (ballPositions[0]) first strikes \`{{{numberOfRails}}}\` rail(s). The \`aimingPoint\` is the contact point on the FIRST rail the cue ball should hit.
+    *   After striking the specified number of rails, the cue ball must then strike the object ball (ballPositions[1]).
+    *   After being struck by the cue ball, the object ball (ballPositions[1]) must then travel DIRECTLY towards the \`{{{targetPocket}}}\` (assume 0 further rails for the object ball in this mode for simplicity).
+
+VERY IMPORTANT: The suggested shot MUST result in the object ball (ballPositions[1]) heading towards the specified \`{{{targetPocket}}}\`. The \`{{{numberOfRails}}}\` constraint MUST be respected based on the \`{{{aimingMethod}}}\` and its definition above. The aimingPoint, power, and spin must be physically plausible to achieve this.
+
+Output ONLY the JSON object strictly adhering to the output schema. Do not include any other text, explanations, or apologies.
+If a valid shot cannot be determined, provide a best-effort guess that still adheres to the output JSON schema (e.g. aiming at the object ball towards the pocket with 0 rails if complex rail shot is too hard).
+`,
 });
 
 const suggestShotParametersFlow = ai.defineFlow(
@@ -75,6 +105,14 @@ const suggestShotParametersFlow = ai.defineFlow(
     outputSchema: SuggestShotParametersOutputSchema,
   },
   async input => {
+    // Ensure there are at least two balls for the prompt to make sense as written.
+    // The page logic should already ensure cueBall and selectedPocket are present.
+    if (!input.ballPositions || input.ballPositions.length < 2) {
+      // This case should ideally be prevented by UI/action layer validation.
+      // If it occurs, AI might struggle. We'll return a dummy/error response or let AI handle it.
+      // For now, let AI try, prompt has a note.
+    }
+
     const {output} = await prompt(input);
     return output!;
   }
