@@ -9,7 +9,9 @@ interface PoolTableProps {
   pockets: Pocket[];
   selectedPocketId?: PocketPosition | null;
   cueBall?: Ball | null;
-  aimingPoint?: AimingPoint | null;
+  cueBallTrajectory?: Array<{ x: number; y: number }> | null;
+  objectBallTrajectory?: Array<{ x: number; y: number }> | null;
+  aimingPointVisual?: AimingPoint | null;
   onPocketClick: (pocketId: PocketPosition) => void;
   onBallMove: (ballId: string, newPosition: { x: number; y: number }) => void;
   tableWidth?: number; // SVG units
@@ -29,7 +31,9 @@ export default function PoolTable({
   pockets,
   selectedPocketId,
   cueBall,
-  aimingPoint,
+  cueBallTrajectory,
+  objectBallTrajectory,
+  aimingPointVisual,
   onPocketClick,
   onBallMove,
   tableWidth = DEFAULT_TABLE_WIDTH,
@@ -199,26 +203,35 @@ export default function PoolTable({
             </g>
           );
         })}
-        
-        {/* Aiming Line */}
-        {cueBall && aimingPoint && (
-          <line
-            x1={toSvgX(cueBall.x)}
-            y1={toSvgY(cueBall.y)}
-            x2={toSvgX(aimingPoint.x)}
-            y2={toSvgY(aimingPoint.y)}
-            stroke="hsl(var(--accent))"
+
+        {/* Cue Ball Trajectory */}
+        {cueBallTrajectory && cueBallTrajectory.length > 0 && (
+          <polyline
+            points={cueBallTrajectory.map(p => `${toSvgX(p.x)},${toSvgY(p.y)}`).join(' ')}
+            fill="none"
+            stroke="rgba(0, 100, 255, 0.7)" // Blueish
             strokeWidth="2"
-            strokeDasharray="4 2"
+            strokeDasharray="3 3"
+            pointerEvents="none"
+          />
+        )}
+
+        {/* Object Ball Trajectory */}
+        {objectBallTrajectory && objectBallTrajectory.length > 0 && (
+          <polyline
+            points={objectBallTrajectory.map(p => `${toSvgX(p.x)},${toSvgY(p.y)}`).join(' ')}
+            fill="none"
+            stroke="rgba(255, 165, 0, 0.7)" // Orangeish
+            strokeWidth="2"
             pointerEvents="none"
           />
         )}
         
         {/* Suggested Aiming Point visualization */}
-        {aimingPoint && (
+        {aimingPointVisual && (
            <circle
-            cx={toSvgX(aimingPoint.x)}
-            cy={toSvgY(aimingPoint.y)}
+            cx={toSvgX(aimingPointVisual.x)}
+            cy={toSvgY(aimingPointVisual.y)}
             r={ (balls[0]?.radius ? toSvgX(balls[0].radius) : (0.028 * tableWidth)) / 3 } // Smaller circle for aiming point
             fill="hsl(var(--accent))"
             stroke="white"

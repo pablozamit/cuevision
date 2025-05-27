@@ -5,13 +5,13 @@ import React, { useState, useEffect, useCallback } from 'react';
 import Header from '@/components/cue-vision/Header';
 import PoolTable from '@/components/cue-vision/PoolTable';
 import ShotControls from '@/components/cue-vision/ShotControls';
-import ImageAnalyzer from '@/components/cue-vision/ImageAnalyzer';
 import ShotSuggestionDisplay from '@/components/cue-vision/ShotSuggestionDisplay';
 import { Button } from '@/components/ui/button';
 import { RotateCcw } from 'lucide-react';
-import type { Ball, Pocket, PocketPosition, ShotSuggestion, AnalyzedBallPosition, SimpleBallPosition } from '@/types/pool';
+import type { Ball, Pocket, PocketPosition, ShotSuggestion, SimpleBallPosition } from '@/types/pool';
 import { useToast } from '@/hooks/use-toast';
-import { analyzeTablePhotoAction, suggestShotParametersAction } from './actions';
+import { suggestShotParametersAction } from './actions';
+import { calculateTrajectories, Point } from '@/lib/trajectory'; // Added import
 
 const TABLE_ASPECT_RATIO = 2 / 1; // Standard pool table aspect ratio (length/width)
 const BALL_RADIUS_NORMALIZED = 0.028; // Approximate normalized radius (e.g., 2.25 inches / 88 inches table width for a 8ft table)
@@ -37,8 +37,9 @@ export default function CueVisionPage() {
   const [numRails, setNumRails] = useState<number>(1);
   const [aimingMethod, setAimingMethod] = useState<'ball-first' | 'rail-first'>('ball-first');
   const [shotSuggestion, setShotSuggestion] = useState<ShotSuggestion | null>(null);
+  const [cueLinePoints, setCueLinePoints] = useState<Point[] | null>(null); // Added state
+  const [objLinePoints, setObjLinePoints] = useState<Point[] | null>(null); // Added state
   
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSuggestingShot, setIsSuggestingShot] = useState(false);
 
   const { toast } = useToast();
@@ -50,6 +51,8 @@ export default function CueVisionPage() {
     setCueBallId('cue');
     setSelectedPocketId(null);
     setShotSuggestion(null);
+    setCueLinePoints(null); // Reset trajectory
+    setObjLinePoints(null); // Reset trajectory
     toast({ title: "Table Reset", description: "Ball positions have been reset to default." });
   };
 
@@ -61,47 +64,6 @@ export default function CueVisionPage() {
     );
   }, []);
 
-  const handleAnalyzeImage = useCallback(async (photoDataUri: string) => {
-    setIsAnalyzing(true);
-    setShotSuggestion(null); 
-    try {
-      const result = await analyzeTablePhotoAction({ photoDataUri });
-      if (result.ballPositions && result.ballPositions.length > 0) {
-        const newBalls: Ball[] = result.ballPositions.map((bp: AnalyzedBallPosition, index: number) => ({
-          id: `ball-${index}-${Date.now()}`, // Consider more stable IDs if analysis needs to identify specific balls
-          x: bp.x,
-          y: bp.y,
-          color: bp.color.toLowerCase(),
-          radius: BALL_RADIUS_NORMALIZED,
-        }));
-        
-        setBalls(newBalls);
-        const foundCueBall = newBalls.find(b => b.color === 'white' || b.color === 'ivory');
-        if (foundCueBall) {
-          setCueBallId(foundCueBall.id);
-        } else if (newBalls.length > 0) {
-          setCueBallId(newBalls[0].id); 
-          toast({ title: "Cue Ball Note", description: "White cue ball not distinctly identified. First ball selected as cue. You may need to adjust.", duration: 5000 });
-        } else {
-          setCueBallId(null);
-        }
-
-        toast({ title: "Image Analyzed", description: "Ball positions updated from image." });
-      } else {
-        // If AI returns empty or malformed, reset to default to avoid broken state
-        setBalls(DEFAULT_BALLS);
-        setCueBallId('cue');
-        toast({ variant: "destructive", title: "Analysis Incomplete", description: "No balls found or analysis failed. Table reset to default." });
-      }
-    } catch (error: any) {
-      setBalls(DEFAULT_BALLS); // Reset on error
-      setCueBallId('cue');
-      toast({ variant: "destructive", title: "Analysis Error", description: error.message || "Failed to analyze image. Table reset to default." });
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, [toast]);
-
   const handleSuggestShot = useCallback(async () => {
     if (!cueBall || !selectedPocketId) {
       toast({ variant: "destructive", title: "Missing Information", description: "Please ensure a cue ball is set and a pocket is selected." });
@@ -109,24 +71,61 @@ export default function CueVisionPage() {
     }
     setIsSuggestingShot(true);
     setShotSuggestion(null);
+    setCueLinePoints(null); // Clear previous trajectory
+    setObjLinePoints(null); // Clear previous trajectory
 
-    const otherBalls = balls.filter(b => b.id !== cueBallId);
-    const allBallSimplePositions: SimpleBallPosition[] = [
+    const objectBall = balls.find(b => b.id === 'obj1');
+
+    if (!objectBall) {
+      toast({ variant: "destructive", title: "Object Ball Missing", description: "The object ball ('obj1') could not be found." });
+      setIsSuggestingShot(false);
+      return;
+    }
+
+    const ballPositions: SimpleBallPosition[] = [
       { x: cueBall.x, y: cueBall.y },
-      ...otherBalls.map(b => ({ x: b.x, y: b.y }))
+      { x: objectBall.x, y: objectBall.y }
     ];
     
     try {
       const suggestion = await suggestShotParametersAction({
-        ballPositions: allBallSimplePositions,
+        ballPositions: ballPositions, // This contains cue and obj1 simple positions
         targetPocket: selectedPocketId,
         numberOfRails: numRails,
         aimingMethod: aimingMethod,
       });
       setShotSuggestion(suggestion);
+
+      if (suggestion && suggestion.aimingPoint && cueBall && objectBall && selectedPocketId) {
+        const targetPocketDefinition = POCKET_DEFINITIONS.find(p => p.id === selectedPocketId);
+        if (targetPocketDefinition) {
+          const trajectories = calculateTrajectories(
+            { x: cueBall.x, y: cueBall.y },
+            { x: objectBall.x, y: objectBall.y },
+            { x: targetPocketDefinition.x, y: targetPocketDefinition.y },
+            suggestion, // Pass the whole suggestion object { aimingPoint, ... }
+            aimingMethod,
+            numRails,
+            { width: 1, height: 1 } // Normalized table dimensions
+          );
+          setCueLinePoints(trajectories.cueBallTrajectory);
+          setObjLinePoints(trajectories.objectBallTrajectory);
+        } else {
+          toast({ variant: "destructive", title: "Pocket Error", description: "Selected pocket definition not found." });
+          setCueLinePoints(null);
+          setObjLinePoints(null);
+        }
+      } else {
+         // If suggestion or necessary ball/pocket data is missing, clear lines
+        setCueLinePoints(null);
+        setObjLinePoints(null);
+      }
+
       toast({ title: "Shot Suggested!", description: "AI has provided shot parameters." });
     } catch (error: any) {
       toast({ variant: "destructive", title: "Suggestion Error", description: error.message || "Failed to get shot suggestion." });
+      setCueLinePoints(null); // Clear trajectories on error
+      setObjLinePoints(null); // Clear trajectories on error
     } finally {
       setIsSuggestingShot(false);
     }
@@ -146,7 +145,10 @@ export default function CueVisionPage() {
             selectedPocketId={selectedPocketId}
             onPocketClick={setSelectedPocketId}
             cueBall={cueBall}
-            aimingPoint={shotSuggestion?.aimingPoint}
+            // aimingPoint prop is removed, replaced by specific trajectory and visual props
+            cueBallTrajectory={cueLinePoints}
+            objectBallTrajectory={objLinePoints}
+            aimingPointVisual={shotSuggestion?.aimingPoint}
             // ballRadius prop is handled by individual ball.radius in PoolTable
           />
           <Button variant="outline" onClick={handleResetBalls} className="mt-4">
@@ -163,10 +165,6 @@ export default function CueVisionPage() {
             onSuggestShot={handleSuggestShot}
             isSuggestingShot={isSuggestingShot}
             availablePockets={POCKET_DEFINITIONS.map(p => p.id)}
-          />
-          <ImageAnalyzer
-            onAnalyzeImage={handleAnalyzeImage}
-            isAnalyzing={isAnalyzing}
           />
           <ShotSuggestionDisplay suggestion={shotSuggestion} />
         </div>

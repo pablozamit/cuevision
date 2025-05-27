@@ -52,7 +52,7 @@ export default function ShotControls({
               <SelectValue placeholder="Select rails" />
             </SelectTrigger>
             <SelectContent>
-              {[0, 1, 2, 3, 4, 5].map((r) => (
+              {[1, 2, 3, 4, 5].map((r) => (
                 <SelectItem key={r} value={String(r)}>
                   {r} Rail{r !== 1 ? 's' : ''}
                 </SelectItem>
