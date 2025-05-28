@@ -148,6 +148,8 @@ export default function CueVisionPage() {
             cueBall={cueBall}
             aimingPoint={shotSuggestion?.aimingPoint}
             // ballRadius prop is handled by individual ball.radius in PoolTable
+            aimingMethod={aimingMethod}
+            numRails={numRails}
           />
           <Button variant="outline" onClick={handleResetBalls} className="mt-4">
             <RotateCcw className="mr-2 h-4 w-4" /> Reset Table
