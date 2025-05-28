@@ -287,13 +287,6 @@ export default function PoolTable({
     let finalCueTrajectory: TrajectoryPoint[] | null = null;
     let finalObjectTrajectory: TrajectoryPoint[] | null = null;
 
-    const currentCueBall = balls.find(b => b.id === selectedCueBallId);
-    const objectBall = selectedObjectBallId ? balls.find(b => b.id === selectedObjectBallId) : null;
-
-    if (!currentCueBall) {
-      onShotParamsCalculated({ angle: null, power: null });
-      return;
-    }
 
     if (aimingMethod === 'ball-first' && objectBall) {
       const trajectories = calculateBallFirstTrajectories(
