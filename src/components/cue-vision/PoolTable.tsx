@@ -14,114 +14,33 @@ import {
   distance,
   add,
 } from '@/lib/utils';
-
-interface TrajectoryPoint extends Vector {
-  type: 'start' | 'bounce' | 'end';
-}
-
-const TOP_NORMAL: Vector = { x: 0, y: 1 };
-const BOTTOM_NORMAL: Vector = { x: 0, y: -1 };
-const LEFT_NORMAL: Vector = { x: 1, y: 0 };
-const RIGHT_NORMAL: Vector = { x: -1, y: 0 };
-
-function calculateTrajectory(
-  startPoint: Vector,
-  initialDirection: Vector,
-  ballRadiusNormalized: number,
-  maxBounces: number,
-  velocityDecayFactor: number = 1.0 
-): TrajectoryPoint[] {
-  const trajectory: TrajectoryPoint[] = [{ ...startPoint, type: 'start' }];
-  let currentPosition = { ...startPoint };
-  let currentDirection = normalize(initialDirection);
-  // let currentVelocityMagnitude = 1.0; // Optional: for velocity decay
-
-  for (let bounceCount = 0; bounceCount < maxBounces; bounceCount++) {
-    let tMin = Infinity;
-    let nextCollisionNormal: Vector | null = null;
-
-    // Top rail (y=0)
-    if (currentDirection.y < 0) { // Moving towards top rail
-      const t = (0 + ballRadiusNormalized - currentPosition.y) / currentDirection.y;
-      if (t > 1e-6 && t < tMin) { // t > 0 (epsilon for floating point)
-        tMin = t;
-        nextCollisionNormal = TOP_NORMAL;
-      }
-    }
-
-    // Bottom rail (y=1)
-    if (currentDirection.y > 0) { // Moving towards bottom rail
-      const t = (1 - ballRadiusNormalized - currentPosition.y) / currentDirection.y;
-      if (t > 1e-6 && t < tMin) {
-        tMin = t;
-        nextCollisionNormal = BOTTOM_NORMAL;
-      }
-    }
-
-    // Left rail (x=0)
-    if (currentDirection.x < 0) { // Moving towards left rail
-      const t = (0 + ballRadiusNormalized - currentPosition.x) / currentDirection.x;
-      if (t > 1e-6 && t < tMin) {
-        tMin = t;
-        nextCollisionNormal = LEFT_NORMAL;
-      }
-    }
-
-    // Right rail (x=1)
-    if (currentDirection.x > 0) { // Moving towards right rail
-      const t = (1 - ballRadiusNormalized - currentPosition.x) / currentDirection.x;
-      if (t > 1e-6 && t < tMin) {
-        tMin = t;
-        nextCollisionNormal = RIGHT_NORMAL;
-      }
-    }
-
-    if (tMin === Infinity || !nextCollisionNormal) {
-      // No collision detected, or moving away from all rails
-      break;
-    }
-
-    const collisionPoint = add(currentPosition, multiplyScalar(currentDirection, tMin));
-    trajectory.push({ ...collisionPoint, type: 'bounce' });
-    currentPosition = collisionPoint;
-    
-    currentDirection = reflect(currentDirection, nextCollisionNormal);
-    // currentDirection = normalize(currentDirection); // reflect should ideally return a normalized vector if normal is normalized. If not, re-normalize.
-                                                     // Our current reflect implementation does not guarantee normalization of the reflected vector.
-                                                     // However, for perfect reflection, the magnitude of velocity (and thus direction vector) shouldn't change.
-                                                     // Let's assume reflect preserves length if input normal is normalized.
-                                                     // And our rail normals ARE normalized.
-
-    // Optional: decay velocity
-    // currentVelocityMagnitude *= velocityDecayFactor;
-    // if (currentVelocityMagnitude < SOME_THRESHOLD) break; // Stop if too slow
-  }
-
-  // Final segment
-  const endPoint = add(currentPosition, multiplyScalar(currentDirection, 2.0)); // Extend by 2.0 normalized units
-  trajectory.push({ ...endPoint, type: 'end' });
-
-  return trajectory;
-}
+import {
+  calculateTrajectory,
+  calculatePreciseCollision,
+  type TrajectoryPoint,
+  type CollisionResult,
+} from '@/lib/physics';
 
 interface PoolTableProps {
   balls: Ball[];
   pockets: Pocket[];
   selectedPocketId?: PocketPosition | null;
-  cueBall?: Ball | null;
+  // cueBall?: Ball | null; // Replaced by selectedCueBallId for logic, but might still be passed for other uses.
   aimingPoint?: AimingPoint | null;
   onPocketClick: (pocketId: PocketPosition) => void;
   onBallMove: (ballId: string, newPosition: { x: number; y: number }) => void;
   tableWidth?: number; // SVG units
   tableHeight?: number; // SVG units
-  // ballRadius is now taken from individual ball.radius (normalized)
   aimingMethod: 'ball-first' | 'rail-first';
   numRails: number;
+  selectedCueBallId?: string | null;
+  selectedObjectBallId?: string | null;
+  onShotParamsCalculated: (params: { angle: number | null; power: number | null }) => void;
+  velocityDecayFactor: number;
 }
 
 const DEFAULT_TABLE_WIDTH = 800;
 const DEFAULT_TABLE_HEIGHT = 400;
-// DEFAULT_BALL_RADIUS (SVG units) is now derived from normalized ball.radius
 
 const DIAMOND_SIGHT_RADIUS = 3; // SVG units
 const CUSHION_VISUAL_THICKNESS_NORMALIZED = 0.03; // Normalized to table width for drawing diamonds
@@ -130,7 +49,7 @@ export default function PoolTable({
   balls,
   pockets,
   selectedPocketId,
-  cueBall,
+  // cueBall, // Potentially remove if selectedCueBallId is primary
   aimingPoint,
   onPocketClick,
   onBallMove,
@@ -138,12 +57,157 @@ export default function PoolTable({
   tableHeight = DEFAULT_TABLE_HEIGHT,
   aimingMethod,
   numRails,
+  selectedCueBallId,
+  selectedObjectBallId,
+  onShotParamsCalculated,
+  velocityDecayFactor,
 }: PoolTableProps) {
   
   const svgRef = useRef<SVGSVGElement>(null);
   const [draggedBall, setDraggedBall] = useState<{ id: string; offsetX: number; offsetY: number } | null>(null);
   const [cueBallTrajectory, setCueBallTrajectory] = useState<TrajectoryPoint[] | null>(null);
   const [objectBallTrajectory, setObjectBallTrajectory] = useState<TrajectoryPoint[] | null>(null);
+
+  // Helper function for 'Ball-First' trajectories
+  const calculateBallFirstTrajectories = (
+    currentCueBall: Ball,
+    objectBall: Ball,
+    numRails: number,
+    velocityDecayFactor: number
+  ): { cueTrajectory: TrajectoryPoint[] | null; objectTrajectory: TrajectoryPoint[] | null } => {
+    const cueStartPoint: Vector = { x: currentCueBall.x, y: currentCueBall.y };
+    const objCenterPoint: Vector = { x: objectBall.x, y: objectBall.y };
+    const dirCueToObj = normalize(subtract(objCenterPoint, cueStartPoint));
+    const objBallRadius = objectBall.radius || 0.028;
+    const collisionPointOnObjectBall = subtract(objCenterPoint, multiplyScalar(dirCueToObj, objBallRadius));
+
+    const cueTrajectory: TrajectoryPoint[] = [
+      { ...cueStartPoint, type: 'start' },
+      { ...collisionPointOnObjectBall, type: 'end' },
+    ];
+
+    const objStartPoint: Vector = { x: objectBall.x, y: objectBall.y };
+    const objInitialDirection = dirCueToObj;
+    const objectTrajectory = calculateTrajectory(
+      objStartPoint,
+      objInitialDirection,
+      objBallRadius,
+      numRails,
+      velocityDecayFactor
+    );
+    return { cueTrajectory, objectTrajectory };
+  };
+
+  // Helper function for 'Rail-First' trajectories
+  const calculateRailFirstTrajectories = (
+    currentCueBall: Ball,
+    objectBall: Ball | null,
+    aimingPoint: AimingPoint,
+    selectedPocketId: PocketPosition | null,
+    numRails: number,
+    velocityDecayFactor: number,
+    pockets: Pocket[]
+  ): { cueTrajectory: TrajectoryPoint[] | null; objectTrajectory: TrajectoryPoint[] | null } => {
+    const cueStartPoint: Vector = { x: currentCueBall.x, y: currentCueBall.y };
+    const initialCueDirection = normalize(subtract(aimingPoint, cueStartPoint));
+    const currentCueBallRadius = currentCueBall.radius || 0.028;
+
+    const rawCueTrajectory = calculateTrajectory(
+      cueStartPoint,
+      initialCueDirection,
+      currentCueBallRadius,
+      numRails,
+      velocityDecayFactor
+    );
+
+    let actualCollisionResult: CollisionResult | null = null;
+    let indexOfSegmentWithCollision = -1;
+
+    if (objectBall) {
+      for (let i = 0; i < rawCueTrajectory.length - 1; i++) {
+        const segmentStart = rawCueTrajectory[i];
+        const segmentEnd = rawCueTrajectory[i + 1];
+        const cueRadius = currentCueBallRadius;
+        const objRadius = objectBall.radius || 0.028;
+        const result = calculatePreciseCollision(
+          segmentStart,
+          segmentEnd,
+          cueRadius,
+          { x: objectBall.x, y: objectBall.y },
+          objRadius
+        );
+        if (result) {
+          actualCollisionResult = result;
+          indexOfSegmentWithCollision = i;
+          break;
+        }
+      }
+    }
+
+    if (actualCollisionResult && objectBall && selectedPocketId) {
+      const calculatedCueTrajectoryBeforeCollision = rawCueTrajectory.slice(0, indexOfSegmentWithCollision + 1).map(p => ({ ...p }));
+      calculatedCueTrajectoryBeforeCollision.push({
+        x: actualCollisionResult.collisionPointOnCuePath.x,
+        y: actualCollisionResult.collisionPointOnCuePath.y,
+        type: 'end',
+      });
+
+      const targetPocketInfo = pockets.find(p => p.id === selectedPocketId);
+      if (!targetPocketInfo) {
+        return { cueTrajectory: calculatedCueTrajectoryBeforeCollision, objectTrajectory: null };
+      }
+
+      const forceDirection = normalize(subtract({ x: objectBall.x, y: objectBall.y }, actualCollisionResult.collisionPointOnCuePath));
+      const objStartPoint: Vector = { x: objectBall.x, y: objectBall.y };
+      const objRadius = objectBall.radius || 0.028;
+      const objectTrajectory = calculateTrajectory(
+        objStartPoint,
+        forceDirection,
+        objRadius,
+        numRails,
+        velocityDecayFactor
+      );
+      return { cueTrajectory: calculatedCueTrajectoryBeforeCollision, objectTrajectory };
+    } else {
+      return { cueTrajectory: rawCueTrajectory, objectTrajectory: null };
+    }
+  };
+  
+  // Helper function for Angle and Power Calculation
+  const updateShotParameters = (
+    cueTrajectory: TrajectoryPoint[] | null,
+    objectTrajectory: TrajectoryPoint[] | null
+  ) => {
+    let calculatedAngleDeg: number | null = null;
+    if (cueTrajectory && cueTrajectory.length >= 2) {
+      const p1 = cueTrajectory[0];
+      const p2 = cueTrajectory[1];
+      const dirVec = subtract(p2, p1);
+      const angleRad = Math.atan2(dirVec.y, dirVec.x);
+      calculatedAngleDeg = angleRad * (180 / Math.PI);
+    }
+
+    const calculatePathLength = (trajectory: TrajectoryPoint[] | null): number => {
+      if (!trajectory) return 0;
+      let pathLen = 0;
+      for (let i = 0; i < trajectory.length - 1; i++) {
+        pathLen += distance(trajectory[i], trajectory[i + 1]);
+      }
+      return pathLen;
+    };
+
+    const cuePathLength = calculatePathLength(cueTrajectory);
+    const objectPathLength = calculatePathLength(objectTrajectory);
+    let totalPathLength: number | null = 0;
+
+    if (cuePathLength === 0 && objectPathLength === 0 && !calculatedAngleDeg) {
+      totalPathLength = null;
+    } else {
+      totalPathLength = cuePathLength + objectPathLength;
+    }
+    onShotParamsCalculated({ angle: calculatedAngleDeg, power: totalPathLength });
+  };
+
 
   const toSvgX = useCallback((normalizedX: number) => normalizedX * tableWidth, [tableWidth]);
   const toSvgY = useCallback((normalizedY: number) => normalizedY * tableHeight, [tableHeight]);
@@ -215,169 +279,66 @@ export default function PoolTable({
     setCueBallTrajectory(null);
     setObjectBallTrajectory(null);
 
-    const currentCueBall = balls.find(b => b.id === cueBall?.id);
-    if (!currentCueBall) return;
+    const currentCueBall = balls.find(b => b.id === selectedCueBallId);
+    const objectBall = selectedObjectBallId ? balls.find(b => b.id === selectedObjectBallId) : null;
 
-    const objectBall = balls.find(b => b.id !== currentCueBall.id);
-    // For "ball-first", we need an object ball.
-    if (aimingMethod === 'ball-first' && !objectBall) return;
+    if (!currentCueBall) return; // No cue ball selected, do nothing
 
+    let finalCueTrajectory: TrajectoryPoint[] | null = null;
+    let finalObjectTrajectory: TrajectoryPoint[] | null = null;
+
+    const currentCueBall = balls.find(b => b.id === selectedCueBallId);
+    const objectBall = selectedObjectBallId ? balls.find(b => b.id === selectedObjectBallId) : null;
+
+    if (!currentCueBall) {
+      onShotParamsCalculated({ angle: null, power: null });
+      return;
+    }
 
     if (aimingMethod === 'ball-first' && objectBall) {
-      // Cue Ball Trajectory: Straight line to the object ball's edge
-      const cueStartPoint: Vector = { x: currentCueBall.x, y: currentCueBall.y };
-      const objCenterPoint: Vector = { x: objectBall.x, y: objectBall.y };
-      
-      const dirCueToObj = normalize(subtract(objCenterPoint, cueStartPoint));
-      const ballRadius = objectBall.radius || 0.028; // Default if not specified
-
-      // Calculate the actual collision point on the circumference of the object ball
-      const collisionPointOnObjectBall = subtract(objCenterPoint, multiplyScalar(dirCueToObj, ballRadius));
-      
-      setCueBallTrajectory([
-        { ...cueStartPoint, type: 'start' },
-        { ...collisionPointOnObjectBall, type: 'end' } 
-      ]);
-
-      // Object Ball Trajectory: From its center, in the direction of cue ball impact, then bounces
-      const objStartPoint: Vector = { x: objectBall.x, y: objectBall.y };
-      // The initial direction of the object ball is the same as the cue ball's direction towards it
-      const objInitialDirection = dirCueToObj; 
-
-      const objTrajectory = calculateTrajectory(
-        objStartPoint,
-        objInitialDirection,
-        ballRadius,
-        numRails
+      const trajectories = calculateBallFirstTrajectories(
+        currentCueBall,
+        objectBall,
+        numRails,
+        velocityDecayFactor
       );
-      setObjectBallTrajectory(objTrajectory);
-    }
-    // TODO: Logic for 'rail-first' will be handled in a future step
-    else if (aimingMethod === 'rail-first') {
-      if (!objectBall || !selectedPocketId || !aimingPoint) {
-        // aimingPoint is the target on the first rail or in that direction for rail-first shots
-        return;
-      }
-
-      const cueStartPoint: Vector = { x: currentCueBall.x, y: currentCueBall.y };
-      const initialCueDirection = normalize(subtract(aimingPoint, cueStartPoint)); // aimingPoint is the target for the first rail
-      const currentCueBallRadius = currentCueBall.radius || 0.028;
-      const objectBallRadius = objectBall.radius || 0.028;
-
-      const rawCueTrajectory = calculateTrajectory(
-        cueStartPoint,
-        initialCueDirection,
-        currentCueBallRadius,
-        numRails
+      finalCueTrajectory = trajectories.cueTrajectory;
+      finalObjectTrajectory = trajectories.objectTrajectory;
+    } else if (aimingMethod === 'rail-first' && aimingPoint) {
+      const trajectories = calculateRailFirstTrajectories(
+        currentCueBall,
+        objectBall, // Can be null
+        aimingPoint,
+        selectedPocketId, // Can be null
+        numRails,
+        velocityDecayFactor,
+        pockets
       );
-
-      let collisionWithObjectBallPoint: Vector | null = null;
-      let cueTrajectoryBeforeCollision: TrajectoryPoint[] = [];
-      for (let i = 0; i < rawCueTrajectory.length; i++) {
-        const point = rawCueTrajectory[i];
-        cueTrajectoryBeforeCollision.push(point);
-        // Simplified collision check: distance between trajectory point and object ball center
-        if (distance(point, { x: objectBall.x, y: objectBall.y }) < objectBallRadius + currentCueBallRadius) {
-          // Approximation: use this point as the collision event.
-          // A more accurate point would be on the circumference of both balls at the point of contact.
-          collisionWithObjectBallPoint = point; 
-          break;
-        }
-      }
-      
-      setCueBallTrajectory(cueTrajectoryBeforeCollision);
-
-      if (collisionWithObjectBallPoint) {
-        const targetPocketInfo = pockets.find(p => p.id === selectedPocketId);
-        if (!targetPocketInfo) {
-          setObjectBallTrajectory(null); // Should not happen if selectedPocketId is valid
-          return;
-        }
-        const pocketTargetPoint: Vector = { x: targetPocketInfo.x, y: targetPocketInfo.y };
-        const objStartPoint: Vector = { x: objectBall.x, y: objectBall.y };
-        const objInitialDirection = normalize(subtract(pocketTargetPoint, objStartPoint));
-        
-        const objTrajectory = calculateTrajectory(
-          objStartPoint,
-          objInitialDirection,
-          objectBallRadius,
-          0 // 0 rails for object ball in this mode
-        );
-        setObjectBallTrajectory(objTrajectory);
-      } else {
-        setObjectBallTrajectory(null); // No collision, object ball doesn't move
-      }
-    }
-
-    // --- Angle and Power Calculations (after trajectories are potentially set) ---
-    // This needs to access the state *after* it's updated.
-    // The most reliable way to do this is to trigger another effect or calculate directly
-    // from the trajectory variables before setting them.
-    // However, for logging as requested, we can use the local trajectory variables
-    // that are about to be set into state.
-    
-    // Let's use a temporary local variable to hold the cue ball trajectory for calculations
-    // This is because setState is async. For immediate calculation, use the value you're about to set.
-    let currentCueTrajectoryForCalc: TrajectoryPoint[] | null = null;
-    if (aimingMethod === 'ball-first' && cueBall && balls.find(b => b.id !== cueBall.id)) {
-        // Re-calculate cue trajectory for ball-first as it's simple and was set above
-        const currentCueBall = balls.find(b => b.id === cueBall?.id);
-        const objectBall = balls.find(b => b.id !== currentCueBall?.id);
-        if (currentCueBall && objectBall) {
-            const cueStartPoint: Vector = { x: currentCueBall.x, y: currentCueBall.y };
-            const objCenterPoint: Vector = { x: objectBall.x, y: objectBall.y };
-            const dirCueToObj = normalize(subtract(objCenterPoint, cueStartPoint));
-            const ballRadius = objectBall.radius || 0.028;
-            const collisionPointOnObjectBall = subtract(objCenterPoint, multiplyScalar(dirCueToObj, ballRadius));
-            currentCueTrajectoryForCalc = [ { ...cueStartPoint, type: 'start' }, { ...collisionPointOnObjectBall, type: 'end' } ];
-        }
-    } else if (aimingMethod === 'rail-first' && cueBallTrajectory) { // cueBallTrajectory here refers to the one calculated in this effect run
-        currentCueTrajectoryForCalc = cueBallTrajectory;
+      finalCueTrajectory = trajectories.cueTrajectory;
+      finalObjectTrajectory = trajectories.objectTrajectory;
+    } else if (aimingMethod === 'ball-first' && !objectBall) {
+        // If aiming for ball-first but no object ball is selected, clear trajectories
+        // This case is handled by the early return if !objectBall, but added for explicit clarity
+        onShotParamsCalculated({ angle: null, power: null });
     }
 
 
-    if (currentCueTrajectoryForCalc && currentCueTrajectoryForCalc.length >= 2) {
-      const p1 = currentCueTrajectoryForCalc[0];
-      const p2 = currentCueTrajectoryForCalc[1];
-      const dirVec = subtract(p2, p1);
-      const angleRad = Math.atan2(dirVec.y, dirVec.x);
-      const angleDeg = angleRad * (180 / Math.PI);
-      console.log("Calculated Cue Ball Angle (deg):", angleDeg);
-    }
+    setCueBallTrajectory(finalCueTrajectory);
+    setObjectBallTrajectory(finalObjectTrajectory);
+    updateShotParameters(finalCueTrajectory, finalObjectTrajectory);
 
-    let totalPathLength = 0;
-    const calculatePathLength = (trajectory: TrajectoryPoint[] | null) => {
-      if (!trajectory) return 0;
-      let pathLen = 0;
-      for (let i = 0; i < trajectory.length - 1; i++) {
-        pathLen += distance(trajectory[i], trajectory[i + 1]);
-      }
-      return pathLen;
-    };
-    
-    // Use the locally computed trajectories for length calculation before they are set to state
-    if (aimingMethod === 'ball-first') {
-        totalPathLength += calculatePathLength(currentCueTrajectoryForCalc); // from re-calc above
-        // Object ball trajectory for ball-first was also calculated above
-        const currentCueBall = balls.find(b => b.id === cueBall?.id);
-        const objectBall = balls.find(b => b.id !== currentCueBall?.id);
-        if (currentCueBall && objectBall) {
-            const objStartPoint: Vector = { x: objectBall.x, y: objectBall.y };
-            const dirCueToObj = normalize(subtract({ x: objectBall.x, y: objectBall.y }, { x: currentCueBall.x, y: currentCueBall.y }));
-            const objInitialDirection = dirCueToObj;
-            const ballRadius = objectBall.radius || 0.028;
-            const objTraj = calculateTrajectory(objStartPoint, objInitialDirection, ballRadius, numRails);
-            totalPathLength += calculatePathLength(objTraj);
-        }
-
-    } else if (aimingMethod === 'rail-first') {
-        totalPathLength += calculatePathLength(cueBallTrajectory); // cueBallTrajectory is the new one calculated in this 'rail-first' block
-        totalPathLength += calculatePathLength(objectBallTrajectory); // objectBallTrajectory is the new one from this 'rail-first' block
-    }
-    
-    console.log("Calculated Total Path Length (proxy for power):", totalPathLength);
-
-  }, [balls, cueBall, aimingPoint, selectedPocketId, aimingMethod, numRails, pockets /* remove toSvgX/Y if not directly used */]);
+  }, [
+    balls, 
+    selectedCueBallId, 
+    selectedObjectBallId, 
+    aimingPoint, 
+    selectedPocketId, 
+    aimingMethod, 
+    numRails, 
+    pockets, 
+    onShotParamsCalculated, 
+    velocityDecayFactor
+  ]);
 
 
   const diamondSightPositions = [
@@ -475,11 +436,11 @@ export default function PoolTable({
           );
         })}
         
-        {/* Aiming Line - Show only if new trajectories are NOT being displayed */}
-        {!cueBallTrajectory && cueBall && aimingPoint && (
+        {/* Aiming Line - Show only if new trajectories are NOT being displayed, and we have a cue ball and aiming point */}
+        {!cueBallTrajectory && selectedCueBallId && balls.find(b => b.id === selectedCueBallId) && aimingPoint && (
           <line
-            x1={toSvgX(cueBall.x)}
-            y1={toSvgY(cueBall.y)}
+            x1={toSvgX(balls.find(b => b.id === selectedCueBallId)!.x)}
+            y1={toSvgY(balls.find(b => b.id === selectedCueBallId)!.y)}
             x2={toSvgX(aimingPoint.x)}
             y2={toSvgY(aimingPoint.y)}
             stroke="hsl(var(--accent))"

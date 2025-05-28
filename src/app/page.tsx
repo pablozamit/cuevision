@@ -32,26 +32,70 @@ const DEFAULT_BALLS: Ball[] = [
 
 export default function CueVisionPage() {
   const [balls, setBalls] = useState<Ball[]>(DEFAULT_BALLS);
-  const [cueBallId, setCueBallId] = useState<string | null>('cue'); // Default cue ball
+  // const [cueBallId, setCueBallId] = useState<string | null>('cue'); // Default cue ball
+  const [selectedCueBallId, setSelectedCueBallId] = useState<string | null>(null);
+  const [selectedObjectBallId, setSelectedObjectBallId] = useState<string | null>(null);
   const [selectedPocketId, setSelectedPocketId] = useState<PocketPosition | null>(null);
   const [numRails, setNumRails] = useState<number>(1);
   const [aimingMethod, setAimingMethod] = useState<'ball-first' | 'rail-first'>('ball-first');
   const [shotSuggestion, setShotSuggestion] = useState<ShotSuggestion | null>(null);
+  const [currentShotAngle, setCurrentShotAngle] = useState<number | null>(null);
+  const [currentShotPowerProxy, setCurrentShotPowerProxy] = useState<number | null>(null);
+  const [velocityDecayFactor, setVelocityDecayFactor] = useState(0.95); // Default value
   
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSuggestingShot, setIsSuggestingShot] = useState(false);
 
   const { toast } = useToast();
 
-  const cueBall = balls.find(b => b.id === cueBallId);
+  // const cueBall = balls.find(b => b.id === cueBallId);
+  const cueBall = balls.find(b => b.id === selectedCueBallId);
+
+
+  useEffect(() => {
+    // Set default cue and object balls when balls change
+    if (balls.length > 0) {
+      const defaultCue = balls.find(b => b.color === 'white' || b.id === 'cue');
+      if (defaultCue) {
+        setSelectedCueBallId(defaultCue.id);
+        const defaultObject = balls.find(b => b.id !== defaultCue.id);
+        if (defaultObject) {
+          setSelectedObjectBallId(defaultObject.id);
+        } else {
+          setSelectedObjectBallId(null);
+        }
+      } else {
+        // If no specific cue ball, pick the first as cue and second as object
+        setSelectedCueBallId(balls[0].id);
+        if (balls.length > 1) {
+          setSelectedObjectBallId(balls[1].id);
+        } else {
+          setSelectedObjectBallId(null);
+        }
+      }
+    } else {
+      setSelectedCueBallId(null);
+      setSelectedObjectBallId(null);
+    }
+  }, [balls]);
 
   const handleResetBalls = () => {
     setBalls(DEFAULT_BALLS);
-    setCueBallId('cue');
+    // setCueBallId('cue'); // cueBallId is now selectedCueBallId, managed by useEffect
+    // setSelectedCueBallId('cue'); // This will be handled by the useEffect
+    // setSelectedObjectBallId(DEFAULT_BALLS.find(b => b.id !== 'cue')?.id || null); // Handled by useEffect
     setSelectedPocketId(null);
     setShotSuggestion(null);
+    setCurrentShotAngle(null);
+    setCurrentShotPowerProxy(null);
+    setVelocityDecayFactor(0.95); // Reset to default
     toast({ title: "Table Reset", description: "Ball positions have been reset to default." });
   };
+
+  const handleShotParamsCalculated = useCallback((params: { angle: number | null; power: number | null }) => {
+    setCurrentShotAngle(params.angle);
+    setCurrentShotPowerProxy(params.power);
+  }, []);
 
   const handleBallMove = useCallback((ballId: string, newPosition: { x: number; y: number }) => {
     setBalls(prevBalls =>
@@ -68,34 +112,31 @@ export default function CueVisionPage() {
       const result = await analyzeTablePhotoAction({ photoDataUri });
       if (result.ballPositions && result.ballPositions.length > 0) {
         const newBalls: Ball[] = result.ballPositions.map((bp: AnalyzedBallPosition, index: number) => ({
-          id: `ball-${index}-${Date.now()}`, // Consider more stable IDs if analysis needs to identify specific balls
+          id: `ball-${index}-${Date.now()}`, 
           x: bp.x,
           y: bp.y,
           color: bp.color.toLowerCase(),
           radius: BALL_RADIUS_NORMALIZED,
         }));
         
-        setBalls(newBalls);
-        const foundCueBall = newBalls.find(b => b.color === 'white' || b.color === 'ivory');
-        if (foundCueBall) {
-          setCueBallId(foundCueBall.id);
-        } else if (newBalls.length > 0) {
-          setCueBallId(newBalls[0].id); 
-          toast({ title: "Cue Ball Note", description: "White cue ball not distinctly identified. First ball selected as cue. You may need to adjust.", duration: 5000 });
-        } else {
-          setCueBallId(null);
-        }
+        setBalls(newBalls); // This will trigger the useEffect to set cue/object balls
+        // const foundCueBall = newBalls.find(b => b.color === 'white' || b.color === 'ivory');
+        // if (foundCueBall) {
+        //   setSelectedCueBallId(foundCueBall.id);
+        // } else if (newBalls.length > 0) {
+        //   setSelectedCueBallId(newBalls[0].id); 
+        //   toast({ title: "Cue Ball Note", description: "White cue ball not distinctly identified. First ball selected as cue. You may need to adjust.", duration: 5000 });
+        // } else {
+        //   setSelectedCueBallId(null);
+        // }
 
         toast({ title: "Image Analyzed", description: "Ball positions updated from image." });
       } else {
-        // If AI returns empty or malformed, reset to default to avoid broken state
-        setBalls(DEFAULT_BALLS);
-        setCueBallId('cue');
+        setBalls(DEFAULT_BALLS); // This will trigger the useEffect
         toast({ variant: "destructive", title: "Analysis Incomplete", description: "No balls found or analysis failed. Table reset to default." });
       }
     } catch (error: any) {
-      setBalls(DEFAULT_BALLS); // Reset on error
-      setCueBallId('cue');
+      setBalls(DEFAULT_BALLS); // Reset on error, triggers useEffect
       toast({ variant: "destructive", title: "Analysis Error", description: error.message || "Failed to analyze image. Table reset to default." });
     } finally {
       setIsAnalyzing(false);
@@ -103,22 +144,38 @@ export default function CueVisionPage() {
   }, [toast]);
 
   const handleSuggestShot = useCallback(async () => {
-    if (!cueBall || !selectedPocketId) {
-      toast({ variant: "destructive", title: "Missing Information", description: "Please ensure a cue ball is set and a pocket is selected." });
+    if (!selectedCueBallId || !selectedObjectBallId || !selectedPocketId) {
+      toast({ variant: "destructive", title: "Missing Information", description: "Please ensure a cue ball, object ball, and pocket are selected." });
       return;
     }
+    const currentCueBall = balls.find(b => b.id === selectedCueBallId);
+    const currentObjectBall = balls.find(b => b.id === selectedObjectBallId);
+
+    if (!currentCueBall || !currentObjectBall) {
+      toast({ variant: "destructive", title: "Invalid Selection", description: "Selected cue or object ball not found." });
+      return;
+    }
+
     setIsSuggestingShot(true);
     setShotSuggestion(null);
 
-    const otherBalls = balls.filter(b => b.id !== cueBallId);
-    const allBallSimplePositions: SimpleBallPosition[] = [
-      { x: cueBall.x, y: cueBall.y },
-      ...otherBalls.map(b => ({ x: b.x, y: b.y }))
-    ];
+    // Prepare ball positions for the backend, ensuring cue is first
+    const simpleBalls: SimpleBallPosition[] = balls.map(b => ({ x: b.x, y: b.y, id: b.id }));
+    const cueBallForAction = simpleBalls.find(b => b.id === selectedCueBallId);
+    const otherBallsForAction = simpleBalls.filter(b => b.id !== selectedCueBallId);
+    
+    const orderedBallPositions = cueBallForAction ? [cueBallForAction, ...otherBallsForAction] : otherBallsForAction;
+
+
+    // const otherBalls = balls.filter(b => b.id !== selectedCueBallId);
+    // const allBallSimplePositions: SimpleBallPosition[] = [
+    //   { x: cueBall.x, y: cueBall.y },
+    //   ...otherBalls.map(b => ({ x: b.x, y: b.y }))
+    // ];
     
     try {
       const suggestion = await suggestShotParametersAction({
-        ballPositions: allBallSimplePositions,
+        ballPositions: orderedBallPositions.map(({id, ...rest}) => rest), // Send positions without IDs
         targetPocket: selectedPocketId,
         numberOfRails: numRails,
         aimingMethod: aimingMethod,
@@ -130,7 +187,7 @@ export default function CueVisionPage() {
     } finally {
       setIsSuggestingShot(false);
     }
-  }, [cueBall, selectedPocketId, balls, cueBallId, numRails, aimingMethod, toast]);
+  }, [balls, selectedCueBallId, selectedObjectBallId, selectedPocketId, numRails, aimingMethod, toast]);
 
 
   return (
@@ -140,16 +197,19 @@ export default function CueVisionPage() {
         <div className="lg:w-2/3 flex flex-col items-center">
           <PoolTable
             balls={balls}
-            setBalls={setBalls} // Pass setBalls for direct manipulation if needed by PoolTable, or use onBallMove
+            // setBalls={setBalls} // Pass setBalls for direct manipulation if needed by PoolTable, or use onBallMove
             onBallMove={handleBallMove}
             pockets={POCKET_DEFINITIONS}
             selectedPocketId={selectedPocketId}
             onPocketClick={setSelectedPocketId}
-            cueBall={cueBall}
+            // cueBall={cueBall} // cueBall is now derived from selectedCueBallId
+            selectedCueBallId={selectedCueBallId}
+            selectedObjectBallId={selectedObjectBallId}
             aimingPoint={shotSuggestion?.aimingPoint}
-            // ballRadius prop is handled by individual ball.radius in PoolTable
             aimingMethod={aimingMethod}
             numRails={numRails}
+            onShotParamsCalculated={handleShotParamsCalculated}
+            velocityDecayFactor={velocityDecayFactor}
           />
           <Button variant="outline" onClick={handleResetBalls} className="mt-4">
             <RotateCcw className="mr-2 h-4 w-4" /> Reset Table
@@ -157,6 +217,11 @@ export default function CueVisionPage() {
         </div>
         <div className="lg:w-1/3 space-y-6">
           <ShotControls
+            balls={balls}
+            cueBallId={selectedCueBallId}
+            onCueBallChange={setSelectedCueBallId}
+            objectBallId={selectedObjectBallId}
+            onObjectBallChange={setSelectedObjectBallId}
             numRails={numRails}
             setNumRails={setNumRails}
             aimingMethod={aimingMethod}
@@ -165,12 +230,18 @@ export default function CueVisionPage() {
             onSuggestShot={handleSuggestShot}
             isSuggestingShot={isSuggestingShot}
             availablePockets={POCKET_DEFINITIONS.map(p => p.id)}
+            velocityDecayFactor={velocityDecayFactor}
+            onVelocityDecayChange={setVelocityDecayFactor}
           />
           <ImageAnalyzer
             onAnalyzeImage={handleAnalyzeImage}
             isAnalyzing={isAnalyzing}
           />
-          <ShotSuggestionDisplay suggestion={shotSuggestion} />
+          <ShotSuggestionDisplay
+            suggestion={shotSuggestion}
+            shotAngle={currentShotAngle}
+            shotPowerProxy={currentShotPowerProxy}
+          />
         </div>
       </main>
       <footer className="text-center p-4 text-sm text-muted-foreground border-t border-border">
