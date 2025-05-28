@@ -6,23 +6,26 @@ import Header from '@/components/cue-vision/Header';
 import PoolTable from '@/components/cue-vision/PoolTable';
 import ShotControls from '@/components/cue-vision/ShotControls';
 import ImageAnalyzer from '@/components/cue-vision/ImageAnalyzer';
-import ShotSuggestionDisplay from '@/components/cue-vision/ShotSuggestionDisplay';
+// ShotSuggestionDisplay removed
 import { Button } from '@/components/ui/button';
 import { RotateCcw } from 'lucide-react';
-import type { Ball, Pocket, PocketPosition, ShotSuggestion, AnalyzedBallPosition, SimpleBallPosition } from '@/types/pool';
+import type { Ball, Pocket, PocketPosition, AnalyzedBallPosition, SimpleBallPosition, AimingPoint } from '@/types/pool'; // ShotSuggestion removed, AimingPoint added
 import { useToast } from '@/hooks/use-toast';
-import { analyzeTablePhotoAction, suggestShotParametersAction } from './actions';
+import { analyzeTablePhotoAction } from './actions'; // suggestShotParametersAction removed
 
 const TABLE_ASPECT_RATIO = 2 / 1; // Standard pool table aspect ratio (length/width)
-const BALL_RADIUS_NORMALIZED = 0.028; // Approximate normalized radius (e.g., 2.25 inches / 88 inches table width for a 8ft table)
+const BALL_RADIUS_NORMALIZED = 0.01125; // Approximate normalized radius (e.g., 1.125 inch ball radius / 100 inch table playing width)
+
+const AIMING_LINE_SPIN_SENSITIVITY = 0.087; // Max deflection angle approx 5 degrees (sin(0.087) ~= 0.087)
+const AIMING_LINE_FOLLOW_DRAW_SENSITIVITY = 0.05; // Max 5% change in line length based on top/bottom spin
 
 const POCKET_DEFINITIONS: Pocket[] = [
-  { id: 'top-left', x: 0.02, y: 0.02, radius: 0.045 }, // Slightly adjusted radius
-  { id: 'top-middle', x: 0.5, y: 0.01, radius: 0.05 },
-  { id: 'top-right', x: 0.98, y: 0.02, radius: 0.045 },
-  { id: 'bottom-left', x: 0.02, y: 0.98, radius: 0.045 },
-  { id: 'bottom-middle', x: 0.5, y: 0.99, radius: 0.05 },
-  { id: 'bottom-right', x: 0.98, y: 0.98, radius: 0.045 },
+  { id: 'top-left', x: 0.0, y: 0.0, radius: 0.025 },
+  { id: 'top-middle', x: 0.5, y: 0.0, radius: 0.0275 },
+  { id: 'top-right', x: 1.0, y: 0.0, radius: 0.025 },
+  { id: 'bottom-left', x: 0.0, y: 1.0, radius: 0.025 },
+  { id: 'bottom-middle', x: 0.5, y: 1.0, radius: 0.0275 },
+  { id: 'bottom-right', x: 1.0, y: 1.0, radius: 0.025 },
 ];
 
 const DEFAULT_BALLS: Ball[] = [
@@ -32,14 +35,17 @@ const DEFAULT_BALLS: Ball[] = [
 
 export default function CueVisionPage() {
   const [balls, setBalls] = useState<Ball[]>(DEFAULT_BALLS);
-  const [cueBallId, setCueBallId] = useState<string | null>('cue'); // Default cue ball
+  const [cueBallId] = useState<string>('cue'); // Fixed cue ball id
   const [selectedPocketId, setSelectedPocketId] = useState<PocketPosition | null>(null);
   const [numRails, setNumRails] = useState<number>(1);
   const [aimingMethod, setAimingMethod] = useState<'ball-first' | 'rail-first'>('ball-first');
-  const [shotSuggestion, setShotSuggestion] = useState<ShotSuggestion | null>(null);
+  // shotSuggestion and isSuggestingShot removed
+  const [cueHitOffsetX, setCueHitOffsetX] = useState<number>(0); // -1 to 1
+  const [cueHitOffsetY, setCueHitOffsetY] = useState<number>(0); // -1 to 1
+  const [dynamicAimingLineTarget, setDynamicAimingLineTarget] = useState<AimingPoint | null>(null);
   
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isSuggestingShot, setIsSuggestingShot] = useState(false);
+  // isSuggestingShot removed
 
   const { toast } = useToast();
 
@@ -47,9 +53,12 @@ export default function CueVisionPage() {
 
   const handleResetBalls = () => {
     setBalls(DEFAULT_BALLS);
-    setCueBallId('cue');
+    // setCueBallId is removed as cueBallId is fixed
     setSelectedPocketId(null);
-    setShotSuggestion(null);
+    // setShotSuggestion(null) removed;
+    setDynamicAimingLineTarget(null);
+    setCueHitOffsetX(0);
+    setCueHitOffsetY(0);
     toast({ title: "Table Reset", description: "Ball positions have been reset to default." });
   };
 
@@ -63,75 +72,96 @@ export default function CueVisionPage() {
 
   const handleAnalyzeImage = useCallback(async (photoDataUri: string) => {
     setIsAnalyzing(true);
-    setShotSuggestion(null); 
+    setShotSuggestion(null);
     try {
       const result = await analyzeTablePhotoAction({ photoDataUri });
-      if (result.ballPositions && result.ballPositions.length > 0) {
-        const newBalls: Ball[] = result.ballPositions.map((bp: AnalyzedBallPosition, index: number) => ({
-          id: `ball-${index}-${Date.now()}`, // Consider more stable IDs if analysis needs to identify specific balls
-          x: bp.x,
-          y: bp.y,
-          color: bp.color.toLowerCase(),
-          radius: BALL_RADIUS_NORMALIZED,
-        }));
-        
-        setBalls(newBalls);
-        const foundCueBall = newBalls.find(b => b.color === 'white' || b.color === 'ivory');
-        if (foundCueBall) {
-          setCueBallId(foundCueBall.id);
-        } else if (newBalls.length > 0) {
-          setCueBallId(newBalls[0].id); 
-          toast({ title: "Cue Ball Note", description: "White cue ball not distinctly identified. First ball selected as cue. You may need to adjust.", duration: 5000 });
-        } else {
-          setCueBallId(null);
-        }
+      let whiteBallFound = false;
+      let redBallFound = false;
 
-        toast({ title: "Image Analyzed", description: "Ball positions updated from image." });
+      if (result.ballPositions && result.ballPositions.length > 0) {
+        const analyzedWhiteBall = result.ballPositions.find(bp => bp.color.toLowerCase() === 'white' || bp.color.toLowerCase() === 'ivory');
+        const analyzedRedBall = result.ballPositions.find(bp => bp.color.toLowerCase() === 'red');
+
+        setBalls(prevBalls => prevBalls.map(ball => {
+          if (ball.id === 'cue' && analyzedWhiteBall) {
+            whiteBallFound = true;
+            return { ...ball, x: analyzedWhiteBall.x, y: analyzedWhiteBall.y };
+          }
+          if (ball.id === 'obj1' && analyzedRedBall) {
+            redBallFound = true;
+            return { ...ball, x: analyzedRedBall.x, y: analyzedRedBall.y };
+          }
+          return ball;
+        }));
+
+        if (whiteBallFound && redBallFound) {
+          toast({ title: "Image Analyzed", description: "White and red ball positions updated." });
+        } else {
+          let description = "";
+          if (!whiteBallFound && !redBallFound) {
+            description = "Neither white nor red ball found. Positions remain unchanged.";
+          } else if (!whiteBallFound) {
+            description = "White ball not found; its position remains unchanged. Red ball updated.";
+          } else { // !redBallFound
+            description = "Red ball not found; its position remains unchanged. White ball updated.";
+          }
+          toast({ title: "Analysis Partially Complete", description, duration: 5000 });
+        }
       } else {
-        // If AI returns empty or malformed, reset to default to avoid broken state
-        setBalls(DEFAULT_BALLS);
-        setCueBallId('cue');
-        toast({ variant: "destructive", title: "Analysis Incomplete", description: "No balls found or analysis failed. Table reset to default." });
+        setBalls(DEFAULT_BALLS); // Reset to default if no balls are found
+        toast({ variant: "destructive", title: "Analysis Incomplete", description: "No balls found in image. Table reset to default." });
       }
     } catch (error: any) {
       setBalls(DEFAULT_BALLS); // Reset on error
-      setCueBallId('cue');
       toast({ variant: "destructive", title: "Analysis Error", description: error.message || "Failed to analyze image. Table reset to default." });
     } finally {
       setIsAnalyzing(false);
     }
-  }, [toast]);
+  }, [toast]); // cueBallId is fixed, no need to include it or setCueBallId in dependencies
 
-  const handleSuggestShot = useCallback(async () => {
-    if (!cueBall || !selectedPocketId) {
-      toast({ variant: "destructive", title: "Missing Information", description: "Please ensure a cue ball is set and a pocket is selected." });
-      return;
+  // useEffect for dynamic aiming line
+  useEffect(() => {
+    if (cueBall && selectedPocketId) {
+      const targetPocket = POCKET_DEFINITIONS.find(p => p.id === selectedPocketId);
+      if (targetPocket) {
+        const Cx = cueBall.x;
+        const Cy = cueBall.y;
+        const Tx = targetPocket.x;
+        const Ty = targetPocket.y;
+
+        let VecX = Tx - Cx;
+        let VecY = Ty - Cy;
+
+        // Apply rotation based on cueHitOffsetX (English)
+        // Clamp input to asin to prevent errors, though SPIN_SENSITIVITY should keep it in range
+        const angleInput = Math.max(-1, Math.min(1, cueHitOffsetX * AIMING_LINE_SPIN_SENSITIVITY));
+        const angleOffset = Math.asin(angleInput); 
+        
+        const cosAngle = Math.cos(angleOffset);
+        const sinAngle = Math.sin(angleOffset);
+
+        const rotatedVecX = VecX * cosAngle - VecY * sinAngle;
+        const rotatedVecY = VecX * sinAngle + VecY * cosAngle;
+
+        // Apply length adjustment based on cueHitOffsetY (Top/Bottom Spin)
+        const lengthFactor = 1 + (cueHitOffsetY * AIMING_LINE_FOLLOW_DRAW_SENSITIVITY);
+        
+        const finalVecX = rotatedVecX * lengthFactor;
+        const finalVecY = rotatedVecY * lengthFactor;
+
+        const dynamicTargetX = Cx + finalVecX;
+        const dynamicTargetY = Cy + finalVecY;
+
+        setDynamicAimingLineTarget({ x: dynamicTargetX, y: dynamicTargetY });
+      } else {
+        setDynamicAimingLineTarget(null);
+      }
+    } else {
+      setDynamicAimingLineTarget(null);
     }
-    setIsSuggestingShot(true);
-    setShotSuggestion(null);
+  }, [cueBall, selectedPocketId, balls, cueHitOffsetX, cueHitOffsetY]); // Added dependencies
 
-    const otherBalls = balls.filter(b => b.id !== cueBallId);
-    const allBallSimplePositions: SimpleBallPosition[] = [
-      { x: cueBall.x, y: cueBall.y },
-      ...otherBalls.map(b => ({ x: b.x, y: b.y }))
-    ];
-    
-    try {
-      const suggestion = await suggestShotParametersAction({
-        ballPositions: allBallSimplePositions,
-        targetPocket: selectedPocketId,
-        numberOfRails: numRails,
-        aimingMethod: aimingMethod,
-      });
-      setShotSuggestion(suggestion);
-      toast({ title: "Shot Suggested!", description: "AI has provided shot parameters." });
-    } catch (error: any) {
-      toast({ variant: "destructive", title: "Suggestion Error", description: error.message || "Failed to get shot suggestion." });
-    } finally {
-      setIsSuggestingShot(false);
-    }
-  }, [cueBall, selectedPocketId, balls, cueBallId, numRails, aimingMethod, toast]);
-
+  // handleSuggestShot removed
 
   return (
     <div className="min-h-screen flex flex-col bg-background text-foreground">
@@ -146,7 +176,9 @@ export default function CueVisionPage() {
             selectedPocketId={selectedPocketId}
             onPocketClick={setSelectedPocketId}
             cueBall={cueBall}
-            aimingPoint={shotSuggestion?.aimingPoint}
+            aimingPoint={dynamicAimingLineTarget}
+            cueHitOffsetX={cueHitOffsetX}
+            cueHitOffsetY={cueHitOffsetY}
             // ballRadius prop is handled by individual ball.radius in PoolTable
           />
           <Button variant="outline" onClick={handleResetBalls} className="mt-4">
@@ -160,15 +192,18 @@ export default function CueVisionPage() {
             aimingMethod={aimingMethod}
             setAimingMethod={setAimingMethod}
             selectedPocket={selectedPocketId}
-            onSuggestShot={handleSuggestShot}
-            isSuggestingShot={isSuggestingShot}
+            // onSuggestShot and isSuggestingShot removed
             availablePockets={POCKET_DEFINITIONS.map(p => p.id)}
+            cueHitOffsetX={cueHitOffsetX}
+            setCueHitOffsetX={setCueHitOffsetX}
+            cueHitOffsetY={cueHitOffsetY}
+            setCueHitOffsetY={setCueHitOffsetY}
           />
           <ImageAnalyzer
             onAnalyzeImage={handleAnalyzeImage}
             isAnalyzing={isAnalyzing}
           />
-          <ShotSuggestionDisplay suggestion={shotSuggestion} />
+          {/* <ShotSuggestionDisplay suggestion={shotSuggestion} /> removed */}
         </div>
       </main>
       <footer className="text-center p-4 text-sm text-muted-foreground border-t border-border">
